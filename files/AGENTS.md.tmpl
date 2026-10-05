@@ -1,0 +1,173 @@
+# {{ project.name }} — agent guide
+
+Rules and workflows for AI coding agents working in this repository. Humans start with `README.md`.
+{%- if options.spec_md %}
+
+**Read `SPEC.md` first.** It defines what this tool must do. If it is incomplete, complete it with the owner before building features, and keep it current as decisions are made.
+{%- endif %}
+
+## Stack
+
+- **Rust**, edition 2024, stable toolchain (rustup with `rustfmt` and `clippy`). The minimum supported Rust version is `rust-version = "1.85"` in `Cargo.toml`; Cargo's resolver picks dependency versions that support it.
+- **One binary crate** (`{{ env.APP_SLUG }}`): no library target, no workspace. The release binary is self-contained apart from the system C library.
+- **clap 4** (derive): commands, options, help and version output, value validation; invalid usage exits with code 2.
+- **anyhow**: the error type of commands; `.context()` / `.with_context()` say what was being done.
+- **tracing** + **tracing-subscriber** (`fmt`, `env-filter`): diagnostics on stderr, controlled by `-v`/`-q` and `RUST_LOG`.
+- **serde** + **serde_json**: machine-readable output (`--format json`).
+- **Tests:** the built-in test harness; `assert_cmd`, `predicates` and `tempfile` for black-box tests of the binary.
+- **Build:** `build.rs` with `dotenvy` (build dependency only) compiles `APP_NAME` from `.env` into the binary.
+
+## Project map
+
+```text
+.env / .env.example     Build and development settings (APP_NAME, APP_SLUG, DEV_ARGS); .env is git-ignored
+Cargo.toml              Package (its name is the executable name), dependencies, [lints], release profile
+Cargo.lock              Exact dependency versions; always committed together with Cargo.toml
+build.rs                Compiles APP_NAME from .env into the binary (env!("APP_NAME"))
+rustfmt.toml            Formatting: max width 120
+scripts/dev.sh          Development loop: build and run with DEV_ARGS, again after every change
+scripts/check.sh        Quality gate: cargo fmt --check, clippy -D warnings, tests (--locked)
+src/
+  main.rs               Entry point: parse → logging → commands::run → exit code; the only place that prints errors
+  cli.rs                clap: Cli (global options) and the Command enum, one variant per command
+  config.rs             Build-time metadata: APP_NAME, BIN_NAME, ABOUT
+  logging.rs            tracing subscriber on stderr (-v/-q, RUST_LOG)
+  output.rs             Format (text | json), buffered stdout, write_json, broken-pipe detection
+  commands/mod.rs       Dispatch: Command → handler
+  commands/<command>.rs One module per command: its clap Args, run(), rendering, unit tests
+  domain/mod.rs         Domain logic: pure functions over values and readers
+  domain/<topic>.rs     One module per topic, with unit tests
+tests/cli.rs            Black-box tests: run the compiled binary, check stdout, stderr and exit codes
+{%- if choices.docker != "none" %}
+Dockerfile              Release build stage + minimal runtime image{% if choices.docker == "full" %} + dev stage (Rust toolchain){% endif %}
+docker-compose.yml      `app` (the production image){% if choices.docker == "full" %} and `dev` (development container){% endif %}
+.dockerignore           Keeps target/, .git and .env out of the build context
+{%- endif %}
+```
+
+## Architecture rules
+
+Data flows in one direction; each layer only calls the next one:
+
+```text
+argv → cli.rs (clap parses and validates) → main.rs → commands::run → commands/<command>.rs → domain/<topic>.rs
+                                                                            │
+                                                  stdout ← output.rs ←──────┘      stderr ← tracing logs, errors (main.rs)
+```
+
+- **`main.rs`** only wires things together: parse arguments, initialise logging, call `commands::run`, turn the result into an exit code. It is the only place that prints errors and decides exit codes. No logic.
+- **`cli.rs`** declares the command tree. Global options live in `GlobalArgs` (`global = true`); each command's arguments struct lives in its command module and is referenced from a `Command` variant. Doc comments are the help text: write them for users.
+- **Commands** (`src/commands/<command>.rs`) turn arguments into domain calls and own all I/O of the command: opening files, reading standard input, rendering results to `out: &mut impl Write`. They never call `println!`, `std::process::exit` or read environment variables, and they return `anyhow::Result<()>` with context: `.with_context(|| format!("cannot read {}", path.display()))`.
+- **Domain** (`src/domain/<topic>.rs`) is pure logic: it takes values or `impl Read`/`impl BufRead` and returns values or errors. No clap, no printing, no opening files by name, no environment, no process exit. This is where the behaviour is unit-tested.
+- **Output:** results go to stdout, and nothing else does. Logs and errors go to stderr. Commands that print data support `--format json` through `output::Format` with stable `snake_case` field names, so scripts can rely on them; the text format is for humans. Write through the buffered `out` handed to the command; `commands::run` flushes it.
+- **Errors:** messages are lowercase without a trailing period and name the thing that failed: `error: cannot read notes.txt: No such file or directory (os error 2)`. Exit codes: `0` success (also when the reader closes stdout early, e.g. `| head`), `1` runtime error, `2` invalid usage (clap). Never `unwrap()`/`expect()` on user input or I/O outside tests: a panic is a bug.
+- **Logging:** `tracing::{warn, info, debug, trace}!` with structured fields, e.g. `debug!(input = %path.display(), ?counts, "counted")`. Default level `warn`; `-v` info, `-vv` debug, `-vvv` trace, `-q` errors only; a non-empty `RUST_LOG` overrides the flags.
+- **Performance:** stream input (`BufRead`, line or chunk at a time) instead of reading whole files; write through the buffered, locked stdout; avoid per-item allocations in hot loops. The release profile uses LTO, one codegen unit and stripped symbols.
+
+## Commands
+{% if choices.docker == "full" %}
+**Everything runs in Docker.** Rust is not needed on the host and `cargo` must not be run there: `target/` and the crate cache live in Docker volumes and contain Linux builds. Run every command below inside the dev container:
+
+- `sh scripts/dev.sh` → `docker compose up dev`;
+- any other command → `docker compose run --rm dev <command>`, e.g. `docker compose run --rm dev sh scripts/check.sh` or `docker compose run --rm dev cargo add <crate>`;
+- the production image: `docker compose run --rm --build app <args>` (see Docker below).
+{% endif %}
+| Command | Use |
+| --- | --- |
+| `sh scripts/dev.sh [args…]` | Development loop: builds and runs the tool with `args` (default: `DEV_ARGS` from `.env`), then again after every change to `src/`, `build.rs`, `Cargo.toml`, `Cargo.lock` or `.env` |
+| `cargo run -- <args>` | Build and run once: `cargo run -- stats README.md`, `cargo run -q -- --help` |
+| `cargo build --release` | Optimised binary `target/release/{{ env.APP_SLUG }}` |
+| `cargo test` | All tests; one test by name: `cargo test counts_unicode`; only the black-box tests: `cargo test --test cli` |
+| `sh scripts/check.sh` | **Quality gate:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`; `--locked` fails when `Cargo.lock` is out of date |
+| `cargo fmt --all` | Format all files |
+| `cargo clippy --all-targets -- -D warnings` | Lints (clippy pedantic is enabled in `Cargo.toml`) |
+{%- if choices.docker != "full" %}
+| `cargo install --path . --locked` | Install the release binary into `~/.cargo/bin` so `{{ env.APP_SLUG }}` works in any terminal |
+{%- endif %}
+| `cargo add <crate>` / `cargo add --dev <crate>` | Add a dependency (updates `Cargo.lock`) |
+
+## Configuration and environment
+
+- `.env` in the project root holds the settings for building and developing; `.env.example` lists every key with a comment and is committed. Never commit `.env`.
+- The display name comes **only** from `APP_NAME`. `build.rs` reads it from `.env` (then from the `APP_NAME` environment variable, used by Docker and CI builds, then from `.env.example`) and compiles it in; code uses `config::APP_NAME`. Never hardcode the name. Cargo rebuilds automatically when `.env` changes. The text after the name on the first line of `--help` is `description` in `Cargo.toml`: replace the placeholder with what the tool does.
+- The executable name is `package.name` in `Cargo.toml` (`{{ env.APP_SLUG }}`), mirrored by `APP_SLUG` in `.env`; code uses `config::BIN_NAME`. To rename the executable, change `package.name`, `APP_SLUG`{% if choices.docker != "none" %}, the binary name in `Dockerfile` (`COPY` and `ENTRYPOINT`){% endif %} and the docs, then run `cargo build` so `Cargo.lock` records the new name.
+- `DEV_ARGS` holds the arguments of the development loop; quotes work like in a shell (`DEV_ARGS="stats 'my notes.txt'"`).
+- **The binary never reads `.env` at run time**: a CLI runs in other people's folders, where a `.env` belongs to them. Run-time behaviour comes from command-line options. When an option should also be settable from the environment, enable clap's `env` feature and use `#[arg(long, env = "…")]` with a variable name prefixed by the tool's name. Standard variables that already work: `RUST_LOG`, `NO_COLOR`.
+- To bake another value into the binary: add the key to `.env.example` and `.env`, emit it in `build.rs` with `cargo::rustc-env=KEY=value` (`.env` is already watched), and expose it in `src/config.rs` with `env!("KEY")`. Never bake secrets: binaries can be read.
+
+## How to
+
+### Add a command (example: `hash`)
+
+1. **Domain:** `src/domain/hash.rs` with the pure logic and its unit tests; add `pub mod hash;` to `src/domain/mod.rs`.
+2. **Command:** `src/commands/hash.rs` with `#[derive(Debug, Args)] pub struct HashArgs` (doc comment on every field: it is the help text; `format: Format` when it prints data) and `pub fn run(args: &HashArgs, out: &mut impl Write) -> Result<()>` that reads inputs, calls the domain and renders text or JSON. Add `pub mod hash;` to `src/commands/mod.rs`.
+3. **Register:** a variant with a doc comment in `Command` (`src/cli.rs`): `/// Print checksums of files` + `Hash(HashArgs)`, and a match arm in `commands::run`.
+4. **Tests:** unit tests in both modules (render into a `Vec<u8>`), black-box tests in `tests/cli.rs` or a new `tests/hash.rs` with `cargo_bin_cmd!()`: stdout, stderr, exit codes and the JSON shape.
+5. **Docs:** the usage section of `README.md`{% if options.spec_md %} and `SPEC.md`{% endif %}.
+6. Run `sh scripts/check.sh`.
+
+The `stats` command is the reference for every layer: `src/domain/stats.rs`, `src/commands/stats.rs`, the `Stats` variant in `src/cli.rs` and `tests/cli.rs`. When it is no longer useful, delete those parts together, and change `DEV_ARGS` in `.env`/`.env.example`{% if choices.docker != "none" %} and the `docker-run` command in `.fastdev.toml`{% endif %}.
+
+### Add an option
+
+- A field in the command's `Args` struct with `#[arg(…)]` and a doc comment; a global option goes into `GlobalArgs` with `global = true`.
+- Fixed choices are a `#[derive(ValueEnum)]` enum; numbers with limits use `value_parser = clap::value_parser!(u32).range(1..)`; paths are `PathBuf`; repeatable flags use `action = ArgAction::Count` or `Vec<T>`.
+- Test parsing with `Cli::try_parse_from([...])` in `src/cli.rs` and behaviour through the binary in `tests/`.
+
+### Read inputs and write outputs
+
+- Follow `stats`: a path of `-` means standard input; files are read with `BufReader::new(File::open(path)?)`; without any input, refuse to wait on an interactive terminal (`io::stdin().is_terminal()`).
+- A command that writes files takes the output path as an option, writes to a temporary file in the same folder and renames it when complete, and never overwrites without an explicit `--force`.
+
+### Add a dependency
+
+- `cargo add <crate>` (`--dev` for tests only, `--build` for `build.rs`), with `default-features = false` and only the needed features when the crate is heavy. Commit `Cargo.lock`.
+- Prefer the standard library. Dependencies must support `rust-version`; raising it is a deliberate change (update `README.md`).
+
+## Testing
+
+- `cargo test` runs the unit tests (`#[cfg(test)] mod tests` at the bottom of each file in `src/`) and the black-box tests in `tests/`.
+- **Unit tests:** domain functions with in-memory input (`"text".as_bytes()`), renderers with a `Vec<u8>` as `out`, argument parsing with `Cli::try_parse_from`.
+- **Black-box tests:** `tool()` in `tests/cli.rs` runs the real binary (`assert_cmd::cargo::cargo_bin_cmd!()`); create input files in a `tempfile::TempDir`, feed standard input with `.write_stdin()`, and assert stdout, stderr and the exit code with `predicates`. Parse JSON output with `serde_json` instead of comparing strings.
+- Tests must not depend on the machine: no absolute paths, network or files outside a temporary folder. Refer to the name with `env!("APP_NAME")` / `env!("CARGO_PKG_NAME")`, never literally.
+- Every new command, option or bug fix gets tests in the layer where the logic lives.
+
+## Definition of done
+
+1. `sh scripts/check.sh` passes with **zero** warnings (format, clippy, tests){% if choices.docker == "full" %} — run it as `docker compose run --rm dev sh scripts/check.sh`{% endif %}.
+2. {% if choices.docker == "full" %}`docker compose build app` succeeds (the release build runs inside it).{% else %}`cargo build --release` succeeds{% if choices.docker == "run" %}, and `docker compose build app` still builds the image when `Dockerfile`, dependencies or files needed by the build changed{% endif %}.{% endif %}
+3. New behaviour is covered by tests; `--help` describes every command and option correctly.
+4. Docs match the code: `README.md` (usage), `.env.example`{% if options.spec_md %}, `SPEC.md`{% endif %} and this file are updated when commands, options, env keys, structure or rules change.
+5. `Cargo.lock` is committed together with every change to `Cargo.toml`.
+
+## Conventions
+
+- `rustfmt` decides formatting (`cargo fmt --all`); do not hand-format.
+- Lints: clippy `pedantic` is enabled and warnings fail the gate. Fix the code instead of adding `#[allow]`; when an allow is really justified, put it on the smallest item with a comment explaining why. `unsafe` code is forbidden (`[lints.rust]`).
+- Naming: modules and files `snake_case`, types `UpperCamelCase`; one module per command (named after the command) and per domain topic; JSON fields `snake_case`.
+- Help texts: doc comments on commands and arguments, starting with a capital letter, without a trailing period.
+- Errors: `anyhow::Result` in commands. The domain returns `io::Result` or its own error enum when callers need to tell errors apart (add `thiserror` for it).
+- Visibility: `pub` inside the crate is fine (it is a binary); keep helpers private to their module.
+- Dependencies: few, well-known and current; add one only when it clearly pays off.
+- Write code, comments, help texts and docs in English.
+{% if choices.docker != "none" %}
+## Docker
+
+{% if choices.docker == "full" -%}
+Mode: **everything in Docker**. `docker-compose.yml` has two services:
+
+- `dev` (profile `dev`, stage `dev` of `Dockerfile`, image `rust:1.98-slim-trixie` with `rustfmt` and `clippy`): mounts the project folder at `/app`, keeps `target/` and the crate cache (`CARGO_HOME=/home/dev/.cargo`) in the named volumes `target` and `cargo`, runs as user `dev` (uid 1000) with `init: true`. `docker compose up dev` runs `scripts/dev.sh`; `docker compose run --rm dev <command>` runs anything else. After changing dependencies nothing extra is needed: cargo downloads them into the volume.
+- `app`: the production image (below). `docker compose run --rm --build app <args>` rebuilds it when needed and runs the tool.
+{%- else -%}
+Mode: **Docker to run the app**. Development, tests and the native macOS binary use Rust on the host; Docker builds and runs a Linux image of the tool.
+{%- endif %}
+
+- `Dockerfile`: the `build` stage (`rust:1.98-slim-trixie`) compiles dependencies first with a placeholder `main.rs` (cached until `Cargo.toml`/`Cargo.lock` change), then `cargo build --release --locked`. The runtime image `gcr.io/distroless/cc-debian13:nonroot` contains only `/usr/local/bin/{{ env.APP_SLUG }}`, runs as a non-root user, uses the tool as `ENTRYPOINT` (default arguments: `--help`) and `/work` as the working directory. `.env` is never copied into images.
+- `docker-compose.yml` reads `.env`: `COMPOSE_PROJECT_NAME` ({{ project.slug }}) names the stack and the image `{{ project.slug }}:latest`, `APP_NAME` is a build argument (the binary needs it at build time). The `app` service mounts the project folder at `/work`, so relative paths work: `docker compose run --rm app stats README.md`. `RUST_LOG` is passed through from your shell.
+- The tool keeps no state, so there is no data volume: it reads and writes files in the folder it runs in.
+- Commands: `docker compose build app`, `docker compose run --rm --build app <args>`, `docker compose{% if choices.docker == "full" %} --profile dev{% endif %} down --rmi all{% if choices.docker == "full" %} --volumes{% endif %}` (removes the containers{% if choices.docker == "full" %}, images and the `target`/`cargo` volumes{% else %} and the image{% endif %}).
+- The build stage copies only `Cargo.toml`, `Cargo.lock`, `build.rs` and `src/`. When the build needs more files (e.g. `include_str!("../assets/…")`), add `COPY` lines to the build stage and check `.dockerignore`. Update the `rust:` tag in all stages together.
+{% endif %}
+---
+
+Bootstrapped from `{{ skeleton.id }} {{ skeleton.version }}`.

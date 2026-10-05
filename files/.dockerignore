@@ -1,0 +1,14 @@
+# Keep the build context small and never send local secrets to Docker.
+target
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+Dockerfile
+docker-compose.yml
+.dockerignore
+.vscode
+.idea
+.DS_Store
+*.log

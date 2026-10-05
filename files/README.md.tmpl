@@ -1,0 +1,144 @@
+# {{ project.name }}
+
+A fast command-line tool written in Rust, shipped as a single binary: `{{ env.APP_SLUG }}`.
+
+## Requirements
+
+{% if choices.docker == "full" -%}
+- Docker 24 or newer with Docker Compose. Everything runs in containers; Rust is not needed on this machine.
+{%- else -%}
+- Rust 1.85 or newer from [rustup](https://rustup.rs), with `rustfmt` and `clippy` (included in the default profile; otherwise `rustup component add rustfmt clippy`)
+{%- if choices.docker == "run" %}
+- Docker 24 or newer with Docker Compose (only for the Docker image)
+{%- endif %}
+{%- endif %}
+
+## Quick start
+
+```sh
+[ -f .env ] || cp .env.example .env   # first run after cloning
+{%- if choices.docker == "full" %}
+docker compose run --rm dev cargo fetch
+docker compose up dev                             # development loop (see below)
+docker compose run --rm --build app --help        # the production image
+docker compose run --rm app stats README.md Cargo.toml
+{%- else %}
+cargo fetch
+sh scripts/dev.sh                    # development loop (see below)
+cargo run -- --help
+cargo run -- stats README.md Cargo.toml
+echo "hello world" | cargo run -q -- stats
+{%- endif %}
+```
+
+The development loop builds the tool and runs it with `DEV_ARGS` from `.env` (`stats README.md Cargo.toml`), then again whenever a file in `src/`, `build.rs`, `Cargo.toml`, `Cargo.lock` or `.env` changes. Pass other arguments to override them: `sh scripts/dev.sh stats --format json Cargo.toml`.
+
+## Usage
+
+```text
+{{ env.APP_SLUG }} [OPTIONS] <COMMAND>
+
+Commands:
+  stats  Count lines, words, characters and bytes of files or standard input
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...  Show more log output on stderr (-v info, -vv debug, -vvv trace)
+  -q, --quiet       Show only errors on stderr
+  -h, --help        Print help
+  -V, --version     Print version
+```
+
+Examples:
+
+```sh
+{{ env.APP_SLUG }} stats notes.txt src/main.rs           # table with a total row
+{{ env.APP_SLUG }} stats --format json notes.txt         # JSON for scripts, e.g. | jq .total.words
+cat notes.txt | {{ env.APP_SLUG }} stats                 # standard input (also: `-` as a file name)
+{{ env.APP_SLUG }} -vv stats notes.txt                   # debug logs on stderr; RUST_LOG=debug works too
+```
+
+Results go to stdout, logs and errors to stderr. Exit codes: `0` success, `1` error (e.g. a file cannot be read), `2` invalid arguments.
+
+## Build and install
+{% if choices.docker == "full" %}
+Builds happen in Docker and produce Linux binaries, so the tool is used through its image:
+
+```sh
+docker compose build app                          # image {{ project.slug }}:latest
+docker compose run --rm --build app stats README.md
+docker run --rm -v "$PWD:/work" {{ project.slug }} stats README.md   # the same without Compose
+```
+{% else %}
+```sh
+cargo build --release                # target/release/{{ env.APP_SLUG }}, a single self-contained binary
+cargo install --path . --locked      # installs {{ env.APP_SLUG }} into ~/.cargo/bin (on your PATH with rustup)
+```
+
+The binary runs on machines with the same operating system and CPU architecture; copy it anywhere.
+{% endif %}
+## Development
+{% if choices.docker == "full" %}
+Run commands in the dev container: `docker compose run --rm dev <command>` (`sh scripts/dev.sh` → `docker compose up dev`).
+{% endif %}
+| Command | What it does |
+| --- | --- |
+| `sh scripts/dev.sh [args…]` | Build and run on every change (default arguments: `DEV_ARGS` in `.env`) |
+| `cargo run -- <args>` | Build and run once |
+| `cargo build --release` | Optimised binary in `target/release/` |
+| `cargo test` | Unit tests (in `src/`) and black-box tests of the binary (in `tests/`) |
+| `sh scripts/check.sh` | Format check, clippy (warnings are errors) and tests — the quality gate before commits |
+| `cargo fmt --all` | Format all files |
+| `cargo clippy --all-targets -- -D warnings` | Lints |
+
+## Configuration
+
+`.env` in the project root configures the build and the development loop; it is git-ignored, and `.env.example` documents every key. The binary itself does not read `.env` at run time: its behaviour is controlled by options and by `RUST_LOG` (log filter) and `NO_COLOR`.
+
+| Key | Value | Description |
+| --- | --- | --- |
+| `APP_NAME` | `{{ env.APP_NAME }}` | Display name, compiled into the binary by `build.rs` (first line of `--help`) |
+| `APP_SLUG` | `{{ env.APP_SLUG }}` | Executable name (`package.name` in `Cargo.toml`) |
+| `DEV_ARGS` | `stats README.md Cargo.toml` | Arguments of the development loop |
+{%- if choices.docker != "none" %}
+| `COMPOSE_PROJECT_NAME` | `{{ project.slug }}` | Docker Compose project and image name |
+{%- endif %}
+
+## Project structure
+
+```text
+src/main.rs        Entry point: arguments, logging, exit codes
+src/cli.rs         Command-line interface (clap): global options and commands
+src/commands/      One module per command: arguments, input/output, rendering
+src/domain/        The logic behind the commands, free of I/O and command-line concerns
+src/output.rs      Text and JSON output
+tests/             Black-box tests that run the compiled binary
+scripts/           Development loop and quality gate
+build.rs           Compiles APP_NAME from .env into the binary
+```
+
+The example command **stats** shows every layer end to end: `cli.rs` → `commands/stats.rs` → `domain/stats.rs` → text or JSON output, with unit and black-box tests.
+{% if choices.docker != "none" %}
+## Docker
+{% if choices.docker == "full" %}
+Everything runs in containers. The `dev` service mounts this folder and keeps `target/` and downloaded crates in Docker volumes:
+
+```sh
+docker compose run --rm dev cargo fetch             # after cloning
+docker compose up dev                               # development loop
+docker compose run --rm dev sh scripts/check.sh     # any command
+docker compose run --rm --build app --help          # production image
+docker compose --profile dev down                   # stop; add --volumes to delete target/ and the crate cache
+```
+{% else %}
+```sh
+docker compose build app                          # build the image {{ project.slug }}:latest
+docker compose run --rm --build app stats README.md Cargo.toml
+docker compose down --rmi all                     # remove the containers and the image
+```
+{% endif %}
+The image contains only the release binary on a minimal base (`gcr.io/distroless/cc-debian13`, non-root user). `docker compose run --rm app <args>` mounts the project folder at `/work`, the working directory, so relative paths work. Compose reads `.env`: `APP_NAME` is passed to the build, `COMPOSE_PROJECT_NAME` names the stack and the image. The tool keeps no state, so there is no data volume.
+{% endif %}
+## Contributing
+
+Run `{% if choices.docker == "full" %}docker compose run --rm dev {% endif %}sh scripts/check.sh` before every commit. It must pass without errors or warnings.

@@ -1,0 +1,5 @@
+# fastDev draft state and local artefacts
+.fastdev-draft.toml
+node_modules/
+target/
+.DS_Store

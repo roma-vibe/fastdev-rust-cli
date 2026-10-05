@@ -1,0 +1,196 @@
+# Manifest reference: docs/manifest.md in the fastDev repository.
+schema = 1
+id = "rust-cli"
+name = "Rust CLI"
+description = "A single-binary command-line tool in Rust with clap 4, anyhow and tracing. A new project has an example `stats` command with text and JSON output through every layer, unit and black-box tests, rustfmt and clippy (pedantic) with zero warnings, and a watch-and-run dev loop. For fast command-line utilities that ship as one native executable, optionally also as a small Docker image."
+category = "cli"
+languages = ["rust"]
+tags = ["cli", "rust", "clap", "anyhow", "tracing", "serde", "single-binary", "command-line", "docker"]
+stack = [
+  "Rust 1.85+ (edition 2024)",
+  "clap 4 (derive)",
+  "anyhow 1",
+  "tracing 0.1 + tracing-subscriber 0.3",
+  "serde 1 + serde_json 1",
+  "assert_cmd 2 + predicates 3",
+  "rustfmt + clippy (pedantic)",
+  "Docker: rust 1.98 build, distroless runtime",
+]
+
+# cargo links with the system linker of the Command Line Tools on macOS.
+[requirements]
+cargo = ">=1.85"
+xcode-clt = "*"
+
+[env]
+APP_NAME = "{{ project.name }}"
+# The executable name. Cargo rejects package names that start with a digit or collide with its
+# own folders, so those slugs get an "app-" prefix.
+APP_SLUG = "{% if project.slug[:1] in '0123456789' or project.slug in ['build', 'deps', 'examples', 'incremental'] %}app-{% endif %}{{ project.slug }}"
+
+[[set]]
+file = "Cargo.toml"
+path = ["package", "name"]
+value = "{{ env.APP_SLUG }}"
+
+# Keeps Cargo.lock in sync with the renamed package, so `--locked` works right away.
+[[set]]
+file = "Cargo.lock"
+path = ["package[name=app]", "name"]
+value = "{{ env.APP_SLUG }}"
+
+# Downloads the crates. It also writes Cargo.lock in Cargo's order (the renamed package moves to
+# its sorted place), so the first commit has the lockfile that later cargo commands keep.
+[[setup]]
+label = "Download dependencies"
+run = "cargo fetch"
+
+[commands.dev]
+label = "Dev"
+description = "Builds and runs the tool with DEV_ARGS from .env, then again after every change to the sources, Cargo.toml or .env."
+run = "sh scripts/dev.sh"
+long = true
+primary = true
+
+[commands.build]
+label = "Build"
+description = "Optimised release binary in target/release/."
+run = "cargo build --release"
+
+[commands.start]
+label = "Run release"
+description = "Builds the release binary when needed and shows its help."
+run = "cargo run --release --quiet -- --help"
+
+[commands.test]
+label = "Test"
+description = "Unit tests (src/) and black-box tests of the binary (tests/)."
+run = "cargo test"
+
+[commands.check]
+label = "Check"
+description = "Quality gate: rustfmt, clippy with warnings as errors, all tests."
+run = "sh scripts/check.sh"
+
+[commands.lint]
+label = "Lint"
+description = "clippy on all targets; warnings are errors."
+run = "cargo clippy --all-targets -- -D warnings"
+
+[commands.format]
+label = "Format"
+description = "Formats all Rust files with rustfmt."
+run = "cargo fmt --all"
+
+[commands.install]
+label = "Install"
+description = "Installs the release binary into ~/.cargo/bin, so the tool works in any terminal."
+run = "cargo install --path . --locked"
+
+# ---------------------------------------------------------------------------
+# Docker: how the project uses containers. A CLI has no server, so the production
+# container is an image that runs the tool once per `docker compose run`.
+# ---------------------------------------------------------------------------
+
+[choices.docker]
+label = "Docker"
+description = "How the project uses Docker."
+default = "run"
+
+[choices.docker.options.none]
+label = "No Docker"
+description = "Rust on this Mac builds, tests and runs everything; Install puts the tool into ~/.cargo/bin. No Docker files."
+
+[choices.docker.options.run]
+label = "Docker to run the app"
+description = "Develop, test and install with Rust on this Mac. Docker builds a small Linux image of the tool (distroless, non-root) and runs it on the project folder: `docker compose run --rm app <args>`."
+files = ["Dockerfile", "docker-compose.yml", ".dockerignore"]
+requirements = { docker = ">=24" }
+env = { COMPOSE_PROJECT_NAME = "{{ project.slug }}" }
+# --rmi all: the image has its own name (COMPOSE_PROJECT_NAME), which --rmi local keeps.
+cleanup = "docker compose down --volumes --remove-orphans --rmi all"
+
+[choices.docker.options.run.commands]
+docker-build = { label = "Docker build", description = "Builds the production image of the tool.", run = "docker compose build app" }
+docker-run = { label = "Docker run", description = "Rebuilds the production image when needed and runs the example command in a container on the project folder.", run = "docker compose run --rm --build app stats README.md Cargo.toml" }
+docker-clean = { label = "Docker clean", description = "Removes the project's containers and image.", run = "docker compose down --volumes --remove-orphans --rmi all" }
+
+[choices.docker.options.full]
+label = "Everything in Docker"
+description = "Only Docker is needed on this Mac: the dev loop, tests and checks run in a Rust container, with target/ and downloaded crates in Docker volumes. Builds are Linux binaries, so the tool is used through its Docker image."
+files = ["Dockerfile", "docker-compose.yml", ".dockerignore"]
+requirements = { docker = ">=24" }
+drop_requirements = ["cargo", "xcode-clt"]
+env = { COMPOSE_PROJECT_NAME = "{{ project.slug }}" }
+setup = [{ label = "Download dependencies", run = "docker compose run --rm dev cargo fetch" }]
+cleanup = "docker compose --profile dev down --volumes --remove-orphans --rmi all"
+preview = { command = "docker-run", path = "", message = "Everything runs in Docker: the preview built the production image and ran the example command in a container (the output ends with the table). To try more, run `cd ${PREVIEW_DIR}` in Terminal, then `docker compose run --rm app stats --format json README.md` or `docker compose run --rm app --help`; `docker compose up dev` starts the development loop." }
+
+# There is no macOS binary: the release build is the image (Docker build), and cargo runs in the
+# dev container.
+[choices.docker.options.full.commands]
+dev = { run = "docker compose up dev" }
+build = { run = "" }
+start = { run = "" }
+install = { run = "" }
+test = { run = "docker compose run --rm dev cargo test" }
+check = { run = "docker compose run --rm dev sh scripts/check.sh" }
+lint = { run = "docker compose run --rm dev cargo clippy --all-targets -- -D warnings" }
+format = { run = "docker compose run --rm dev cargo fmt --all" }
+docker-build = { label = "Docker build", description = "Builds the production image of the tool.", run = "docker compose build app" }
+docker-run = { label = "Docker run", description = "Rebuilds the production image when needed and runs the example command in a container on the project folder.", run = "docker compose run --rm --build app stats README.md Cargo.toml" }
+docker-down = { label = "Docker down", description = "Stops the dev container.", run = "docker compose --profile dev down" }
+docker-clean = { label = "Docker clean", description = "Removes the project's containers, images and volumes (target/ and the crate cache).", run = "docker compose --profile dev down --volumes --remove-orphans --rmi all" }
+
+# docker-build exists only with Docker: the "none" variant skips it.
+[verify]
+commands = ["check", "build", "docker-build"]
+variants = [{ docker = "full" }, { docker = "none" }]
+
+# Try the skeleton without creating a project (fastDev "Preview"): a release build that prints
+# the tool's help; `path` shows the folder with the macOS binary. "Everything in Docker"
+# overrides it with the image.
+[preview]
+command = "start"
+path = "target/release"
+message = "The preview built the tool in release mode and ran it with --help (the first line of the output is APP_NAME from .env). To try it, run `cd ${PREVIEW_DIR}` in Terminal, then `./target/release/${APP_SLUG} stats README.md Cargo.toml`, the same with `--format json`, or `echo hello world | ./target/release/${APP_SLUG} stats`."
+
+[translations.ru]
+"Rust CLI" = "Rust CLI"
+"A single-binary command-line tool in Rust with clap 4, anyhow and tracing. A new project has an example `stats` command with text and JSON output through every layer, unit and black-box tests, rustfmt and clippy (pedantic) with zero warnings, and a watch-and-run dev loop. For fast command-line utilities that ship as one native executable, optionally also as a small Docker image." = "Консольная утилита на Rust в виде одного исполняемого файла: clap 4, anyhow и tracing. В новом проекте есть пример команды `stats` с выводом в виде текста и JSON через все слои, модульные тесты и тесты готового бинарника, rustfmt и clippy (pedantic) без предупреждений и цикл разработки с перезапуском при изменениях. Для быстрых утилит командной строки, которые распространяются одним нативным файлом и при желании небольшим Docker-образом."
+"Docker" = "Docker"
+"How the project uses Docker." = "Как проект использует Docker."
+"No Docker" = "Без Docker"
+"Rust on this Mac builds, tests and runs everything; Install puts the tool into ~/.cargo/bin. No Docker files." = "Rust на этом Mac собирает, тестирует и запускает всё; команда «Установка» кладёт утилиту в ~/.cargo/bin. Без файлов Docker."
+"Docker to run the app" = "Docker для запуска"
+"Develop, test and install with Rust on this Mac. Docker builds a small Linux image of the tool (distroless, non-root) and runs it on the project folder: `docker compose run --rm app <args>`." = "Разработка, тесты и установка — с Rust на этом Mac. Docker собирает небольшой Linux-образ утилиты (distroless, без root) и запускает её на папке проекта: `docker compose run --rm app <args>`."
+"Everything in Docker" = "Всё в Docker"
+"Only Docker is needed on this Mac: the dev loop, tests and checks run in a Rust container, with target/ and downloaded crates in Docker volumes. Builds are Linux binaries, so the tool is used through its Docker image." = "На этом Mac нужен только Docker: цикл разработки, тесты и проверки идут в контейнере с Rust, а target/ и скачанные крейты хранятся в томах Docker. Сборки — это Linux-бинарники, поэтому утилита используется через свой Docker-образ."
+"Docker build" = "Docker: сборка"
+"Builds the production image of the tool." = "Собирает продакшен-образ утилиты."
+"Docker run" = "Docker: запуск"
+"Rebuilds the production image when needed and runs the example command in a container on the project folder." = "При необходимости пересобирает продакшен-образ и запускает пример команды в контейнере на папке проекта."
+"Docker clean" = "Docker: очистка"
+"Removes the project's containers and image." = "Удаляет контейнеры и образ проекта."
+"Docker down" = "Docker: остановка"
+"Stops the dev container." = "Останавливает контейнер разработки."
+"Removes the project's containers, images and volumes (target/ and the crate cache)." = "Удаляет контейнеры, образы и тома проекта (target/ и кэш крейтов)."
+"Download dependencies" = "Загрузка зависимостей"
+"Everything runs in Docker: the preview built the production image and ran the example command in a container (the output ends with the table). To try more, run `cd ${PREVIEW_DIR}` in Terminal, then `docker compose run --rm app stats --format json README.md` or `docker compose run --rm app --help`; `docker compose up dev` starts the development loop." = "Всё работает в Docker: предпросмотр собрал продакшен-образ и запустил пример команды в контейнере (вывод заканчивается таблицей). Чтобы попробовать ещё, выполните в Терминале `cd ${PREVIEW_DIR}`, затем `docker compose run --rm app stats --format json README.md` или `docker compose run --rm app --help`; `docker compose up dev` запускает цикл разработки."
+"Dev" = "Dev"
+"Builds and runs the tool with DEV_ARGS from .env, then again after every change to the sources, Cargo.toml or .env." = "Собирает и запускает утилиту с DEV_ARGS из .env, затем снова после каждого изменения исходников, Cargo.toml или .env."
+"Build" = "Сборка"
+"Optimised release binary in target/release/." = "Оптимизированный релизный бинарник в target/release/."
+"Run release" = "Запуск релиза"
+"Builds the release binary when needed and shows its help." = "При необходимости собирает релизный бинарник и показывает его справку."
+"Test" = "Тесты"
+"Unit tests (src/) and black-box tests of the binary (tests/)." = "Модульные тесты (src/) и тесты готового бинарника (tests/)."
+"Check" = "Проверка"
+"Quality gate: rustfmt, clippy with warnings as errors, all tests." = "Контроль качества: rustfmt, clippy с предупреждениями как ошибками, все тесты."
+"Lint" = "Линтер"
+"clippy on all targets; warnings are errors." = "clippy по всем целям сборки; предупреждения считаются ошибками."
+"Format" = "Форматирование"
+"Formats all Rust files with rustfmt." = "Форматирует все файлы Rust с помощью rustfmt."
+"Install" = "Установка"
+"Installs the release binary into ~/.cargo/bin, so the tool works in any terminal." = "Устанавливает релизный бинарник в ~/.cargo/bin, чтобы утилита работала в любом терминале."
+"The preview built the tool in release mode and ran it with --help (the first line of the output is APP_NAME from .env). To try it, run `cd ${PREVIEW_DIR}` in Terminal, then `./target/release/${APP_SLUG} stats README.md Cargo.toml`, the same with `--format json`, or `echo hello world | ./target/release/${APP_SLUG} stats`." = "Предпросмотр собрал утилиту в релизном режиме и запустил её с --help (первая строка вывода — APP_NAME из .env). Чтобы попробовать, выполните в Терминале `cd ${PREVIEW_DIR}`, затем `./target/release/${APP_SLUG} stats README.md Cargo.toml`, то же с `--format json` или `echo hello world | ./target/release/${APP_SLUG} stats`."

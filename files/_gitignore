@@ -1,0 +1,14 @@
+# Build output (also the development loop's timestamp file)
+/target/
+
+# Environment (keep .env.example in Git)
+.env
+.env.*
+!.env.example
+
+# Logs and OS / editor files
+*.log
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

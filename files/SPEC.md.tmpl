@@ -1,0 +1,83 @@
+# {{ project.name }} — Specification
+
+Status: draft · Created {{ project.created_at }}
+
+<!--
+Agents: this is the product specification and the source of truth for what to build.
+Complete it from the initial brief before implementing features: ask the owner about anything
+unclear, replace every guidance comment with real content, delete sections that do not apply,
+and keep the document current as decisions are made.
+-->
+
+## Initial brief
+
+{% if project.brief | trim %}{{ project.brief | trim }}{% else %}_No brief was given. Ask the owner what this tool should do and record the answer here._{% endif %}
+
+## Goals
+
+<!-- 3–5 outcomes that define success. What task does the tool make faster or possible, and how will we know it works? -->
+
+## Users
+
+<!-- Who runs it (developers, operators, scripts and CI jobs), how often, and in which environments (terminal, pipelines, cron, containers). -->
+
+## Scope
+
+### In scope
+
+<!-- Capabilities of the first release. -->
+
+### Out of scope
+
+<!-- What is explicitly excluded for now, to keep the first release small. -->
+
+## Command-line interface
+
+<!--
+The contract with users and scripts. For each command: name, purpose, arguments, options with
+defaults, examples, and output. Keep it in sync with `--help`. Example:
+
+### `{{ env.APP_SLUG }} stats [OPTIONS] [FILE]...`
+- Counts lines, words, characters and bytes of each FILE (`-` or no files: standard input).
+- `-f, --format <text|json>` (default `text`). JSON: `{ "inputs": [{ "name", "lines", "words", "chars", "bytes" }], "total": {…} }`.
+- Global options: `-v/--verbose` (repeatable), `-q/--quiet`.
+-->
+
+## Features
+
+<!--
+One subsection per feature: a user story, testable acceptance criteria and edge cases (empty input,
+huge input, invalid UTF-8, missing files, permissions, interrupted pipes). Example:
+
+### Word statistics
+- As a writer I can count the words of several files at once and see a total.
+- Acceptance: counts match `wc` for ASCII text; a missing file fails with exit code 1 and names the file.
+-->
+
+## Inputs and outputs
+
+<!-- Files and formats the tool reads and writes (encodings, size limits, where outputs go), what goes to stdout vs stderr, and the stability promise of the JSON output. -->
+
+## Exit codes and errors
+
+<!-- 0 success, 1 runtime error, 2 invalid usage are the defaults. Add codes only when scripts need to tell failures apart. Error message style: `error: <what failed>: <why>`. -->
+
+## Configuration
+
+<!-- Options that can also come from environment variables (prefixed with the tool name), config files if any (location, format, precedence: flags > env > file > defaults). The binary never reads the project's .env at run time. -->
+
+## Non-functional requirements
+
+<!-- Performance targets (e.g. 1 GB in under N seconds, memory limits), supported platforms and architectures, minimum Rust version, distribution ({% if choices.docker == "full" %}Docker image{% elif choices.docker == "run" %}single binary, `cargo install`, Docker image{% else %}single binary, `cargo install`{% endif %}), logging, security (untrusted input, paths, permissions). -->
+
+## Open questions
+
+<!-- Decisions that need the owner. Remove an item once it is answered and record the answer in the relevant section. -->
+
+- _None yet._
+
+## Milestones
+
+<!-- Small, shippable increments in order. Each one ends with `sh scripts/check.sh` and `cargo build --release` passing. -->
+
+1. _To be defined._

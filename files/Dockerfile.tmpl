@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+
+# ---- Build: compile the release binary ----
+FROM rust:1.98-slim-trixie AS build
+WORKDIR /app
+
+# build.rs compiles APP_NAME into the binary. .env is never copied into images, so
+# docker-compose.yml passes APP_NAME from .env as a build argument.
+ARG APP_NAME
+RUN test -n "$APP_NAME" || (echo "Build argument APP_NAME is required" >&2 && exit 1)
+
+# Dependencies first, with a placeholder main.rs, so this layer is reused until Cargo.toml or
+# Cargo.lock change.
+COPY Cargo.toml Cargo.lock build.rs ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs \
+    && cargo build --release --locked \
+    && rm -rf src
+
+COPY src src
+# touch: the copied sources keep their original timestamps, which are older than the placeholder.
+RUN touch src/main.rs && cargo build --release --locked
+
+{% if choices.docker == "full" -%}
+# ---- Development: `docker compose up dev`; sources are mounted, target/ and downloaded crates live in volumes ----
+FROM rust:1.98-slim-trixie AS dev
+RUN rustup component add clippy rustfmt \
+    && useradd --create-home --uid 1000 dev \
+    && mkdir -p /app/target /home/dev/.cargo \
+    && chown -R dev:dev /app /home/dev/.cargo
+# Downloaded crates go to the user's cargo home (a volume); the toolchain stays in /usr/local.
+ENV CARGO_HOME=/home/dev/.cargo
+WORKDIR /app
+USER dev
+CMD ["sh", "scripts/dev.sh"]
+
+{% endif -%}
+# ---- Runtime: only the binary, on a minimal image with glibc, running as a non-root user ----
+FROM gcr.io/distroless/cc-debian13:nonroot
+COPY --from=build /app/target/release/{{ env.APP_SLUG }} /usr/local/bin/{{ env.APP_SLUG }}
+# docker-compose.yml mounts the project folder here, so relative paths work.
+WORKDIR /work
+ENTRYPOINT ["{{ env.APP_SLUG }}"]
+CMD ["--help"]

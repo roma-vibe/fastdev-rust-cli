@@ -1,0 +1,43 @@
+# Uses the project's .env: COMPOSE_PROJECT_NAME names the stack and the image, APP_NAME is
+# compiled into the binary.
+{%- if choices.docker == "full" %}
+# Everything runs in containers: `docker compose up dev` for the development loop,
+# `docker compose run --rm dev <command>` for cargo and scripts, and
+# `docker compose run --rm --build app <args>` for the production image.
+{%- else %}
+# `docker compose run --rm --build app <args>` builds the production image and runs the tool.
+{%- endif %}
+services:
+  app:
+    build:
+      context: .
+      args:
+        APP_NAME: ${APP_NAME:?Set APP_NAME in .env}
+    image: ${COMPOSE_PROJECT_NAME:?Set COMPOSE_PROJECT_NAME in .env}:latest
+    environment:
+      # Passed through from your shell when set: RUST_LOG=debug docker compose run --rm app …
+      - RUST_LOG
+    volumes:
+      # The project folder is the working directory: `docker compose run --rm app stats README.md`.
+      - .:/work
+{%- if choices.docker == "full" %}
+
+  dev:
+    profiles: ['dev']
+    build:
+      context: .
+      target: dev
+    # Forwards Ctrl+C and `docker compose stop` to the development loop.
+    init: true
+    environment:
+      - RUST_LOG
+    volumes:
+      # Sources from the project folder; Linux build output and downloaded crates stay in volumes.
+      - .:/app
+      - target:/app/target
+      - cargo:/home/dev/.cargo
+
+volumes:
+  target:
+  cargo:
+{%- endif %}
